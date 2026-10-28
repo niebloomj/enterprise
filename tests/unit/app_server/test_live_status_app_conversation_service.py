@@ -31,6 +31,7 @@ from openhands.app_server.app_conversation.app_conversation_models import (
     AgentType,
     AppConversationInfo,
     AppConversationStartRequest,
+    AppConversationStartTask,
     AppConversationStartTaskStatus,
     AppConversationUpdateRequest,
     ConversationTrigger,
@@ -3470,6 +3471,44 @@ class TestLiveStatusAppConversationService:
         # Only existing secrets should be present
         secrets = result.secrets
         assert secrets == existing_secrets
+
+    @pytest.mark.asyncio
+    async def test_new_conversation_cannot_reuse_legacy_or_cross_workspace_sandboxes(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        org = uuid4()
+        self.mock_user_context.get_user_id = AsyncMock(return_value='owner')
+        self.mock_user_context.get_effective_org_id = AsyncMock(return_value=org)
+
+        def sandbox(sandbox_id, workspace_id, broker_ready):
+            return SandboxInfo(
+                id=sandbox_id,
+                created_by_user_id='owner',
+                workspace_id=workspace_id,
+                subscription_broker_ready=broker_ready,
+                sandbox_spec_id='spec',
+                status=SandboxStatus.RUNNING,
+                session_api_key='key',
+            )
+
+        legacy = sandbox('legacy', None, False)
+        previous = sandbox('previous', str(org), False)
+        foreign = sandbox('foreign', str(uuid4()), True)
+        eligible = sandbox('eligible', str(org), True)
+        self.mock_sandbox_service.search_sandboxes = AsyncMock(
+            return_value=SandboxPage(items=[legacy, previous, foreign, eligible])
+        )
+        assert (await self.service._find_running_sandbox_for_user()).id == 'eligible'
+        for item in (legacy, previous, foreign):
+            self.mock_sandbox_service.get_sandbox = AsyncMock(return_value=item)
+            task = AppConversationStartTask(
+                created_by_user_id='owner',
+                request=AppConversationStartRequest(sandbox_id=item.id),
+            )
+            with pytest.raises(SandboxError):
+                async for _ in self.service._wait_for_sandbox_start(task):
+                    pass
 
     @pytest.mark.asyncio
     async def test_find_running_sandbox_for_user_found(self):

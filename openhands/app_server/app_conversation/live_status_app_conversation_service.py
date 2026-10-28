@@ -182,6 +182,7 @@ from openhands.tools.preset.planning import (
     format_plan_structure,
     get_planning_tools,
 )
+from server.openai_subscription_config import cloud_subscription_enabled
 
 _conversation_info_type_adapter: TypeAdapter[list[ConversationInfo | None]] = (
     TypeAdapter(list[ConversationInfo | None])
@@ -1086,6 +1087,17 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 result[stored_conversation.sandbox_id].append(stored_conversation.id)
         return result
 
+    async def _sandbox_eligible_for_new_conversation(
+        self, sandbox: SandboxInfo
+    ) -> bool:
+        if not cloud_subscription_enabled():
+            return True
+        getter = getattr(self.user_context, 'get_effective_org_id', None)
+        if not callable(getter) or not sandbox.subscription_broker_ready:
+            return False
+        org_id = await getter()
+        return org_id is not None and sandbox.workspace_id == str(org_id)
+
     async def _find_running_sandbox_for_user(self) -> SandboxInfo | None:
         """Find a running sandbox for the current user based on the grouping strategy.
 
@@ -1112,6 +1124,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     if (
                         sandbox.status == SandboxStatus.RUNNING
                         and sandbox.created_by_user_id == user_id
+                        and await self._sandbox_eligible_for_new_conversation(sandbox)
                     ):
                         running_sandboxes.append(sandbox)
 
@@ -1280,6 +1293,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             )
             if sandbox_info is None:
                 raise SandboxError(f'Sandbox not found: {task.request.sandbox_id}')
+            if not await self._sandbox_eligible_for_new_conversation(sandbox_info):
+                raise SandboxError('Sandbox cannot be used for a new conversation')
             sandbox = sandbox_info
 
         # Update the listener with sandbox info

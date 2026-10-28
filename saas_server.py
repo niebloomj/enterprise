@@ -12,6 +12,16 @@ if not os.getenv('OPENHANDS_CONFIG_CLS'):
 # the base app's import-time SPA mount from shadowing those routes.
 os.environ['SERVE_FRONTEND'] = 'false'
 
+from server.openai_subscription_config import cloud_subscription_enabled  # noqa: E402
+
+if cloud_subscription_enabled():
+    # Fail startup rather than silently falling back to shared local credentials.
+    from openhands.sdk.llm.auth.credentials import (  # noqa: E402,F401
+        SubscriptionBrokerCredentialStore,
+    )
+
+    os.environ['OH_OPENAI_SUBSCRIPTION_MODE'] = 'disabled'
+
 from fastapi import Request, status  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
@@ -67,6 +77,9 @@ from server.routes.oauth_providers_admin import (  # noqa: E402
     oauth_provider_admin_router,
 )
 from server.routes.oauth_v2 import oauth_v2_router  # noqa: E402
+from server.routes.openai_subscription import (  # noqa: E402
+    router as subscription_router,
+)
 from server.routes.org_invitations import (  # noqa: E402
     accept_router as invitation_accept_router,
 )
@@ -135,6 +148,8 @@ base_app.include_router(readiness_router)  # Add routes for readiness checks
 base_app.include_router(api_router)  # Add additional route for github auth
 base_app.include_router(oauth_router)  # Add additional route for oauth callback
 base_app.include_router(oauth_device_router)  # Add OAuth 2.0 Device Flow routes
+if cloud_subscription_enabled():
+    base_app.include_router(subscription_router)
 base_app.include_router(idp_router)  # Integrated password IDP (self-hosted)
 base_app.include_router(idp_status_router)  # Integrated IDP status endpoint
 base_app.include_router(

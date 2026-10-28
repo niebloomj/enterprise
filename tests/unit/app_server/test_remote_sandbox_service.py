@@ -377,6 +377,38 @@ class TestEnvironmentInitialization:
     """Test cases for environment variable initialization."""
 
     @pytest.mark.asyncio
+    async def test_cloud_subscription_broker_configuration_is_server_owned(
+        self, remote_sandbox_service, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        spec = SandboxSpecInfo(
+            id='test-image',
+            command=['test'],
+            initial_env={
+                'OH_OPENAI_SUBSCRIPTION_MODE': 'local',
+                'OH_OPENAI_SUBSCRIPTION_BROKER_URL': 'https://attacker.example/token',
+            },
+            working_dir='/workspace',
+        )
+        env = await remote_sandbox_service._init_environment(spec, 'sandbox')
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
+        assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'] == (
+            'https://web.example.com/api/llm/subscription/openai/runtime/token'
+        )
+        assert not any('SESSION_API_KEY' in key for key in env)
+
+    @pytest.mark.asyncio
+    async def test_cloud_subscription_missing_callback_does_not_fall_back_to_local(
+        self, remote_sandbox_service, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        remote_sandbox_service.web_url = None
+        spec = SandboxSpecInfo(id='image', command=['test'], working_dir='/workspace')
+        env = await remote_sandbox_service._init_environment(spec, 'sandbox')
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'disabled'
+        assert 'OH_OPENAI_SUBSCRIPTION_BROKER_URL' not in env
+
+    @pytest.mark.asyncio
     async def test_init_environment_with_web_url(self, remote_sandbox_service):
         """Test environment initialization with web_url set."""
         # Setup

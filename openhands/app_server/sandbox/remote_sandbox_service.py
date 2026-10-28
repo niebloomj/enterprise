@@ -59,6 +59,7 @@ from openhands.app_server.sandbox.sandbox_store import (
     StoredSandbox,
     get_stored_sandbox,
     get_stored_sandbox_by_session_api_key,
+    sandbox_workspace_id,
     search_stored_sandboxes,
     secure_select,
 )
@@ -76,6 +77,10 @@ from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
 from openhands.sdk.utils.paging import page_iterator
+from server.openai_subscription_config import (
+    cloud_subscription_enabled,
+    configure_runtime_subscription,
+)
 
 _logger = logging.getLogger(__name__)
 polling_task: asyncio.Task | None = None
@@ -214,6 +219,8 @@ class RemoteSandboxService(SandboxService):
         return SandboxInfo(
             id=stored.id,
             created_by_user_id=stored.created_by_user_id,
+            workspace_id=stored.workspace_id,
+            subscription_broker_ready=bool(stored.subscription_broker_ready),
             sandbox_spec_id=sandbox_spec_id,
             status=status,
             session_api_key=session_api_key,
@@ -295,6 +302,7 @@ class RemoteSandboxService(SandboxService):
     ) -> dict[str, str]:
         """Initialize the environment variables for the sandbox."""
         environment = sandbox_spec.initial_env.copy()
+        configure_runtime_subscription(environment, self.web_url)
 
         # If a public facing url is defined, add a callback to the agent server environment.
         if self.web_url:
@@ -534,6 +542,7 @@ class RemoteSandboxService(SandboxService):
         """Start a new sandbox by creating a remote runtime."""
         # get user id (also the quota attribution identity)
         user_id = await self.user_context.get_user_id()
+        workspace_id = await sandbox_workspace_id(self.user_context)
         quota_reserved = await self._reserve_daily_sandbox_quota(user_id)
         try:
             # Enforce sandbox limits by cleaning up old sandboxes
@@ -556,6 +565,9 @@ class RemoteSandboxService(SandboxService):
                 id=sandbox_id,
                 backend=REMOTE_BACKEND,
                 created_by_user_id=user_id,
+                workspace_id=workspace_id,
+                subscription_broker_ready=cloud_subscription_enabled()
+                and bool(self.web_url),
                 sandbox_spec_id=sandbox_spec.id,
                 created_at=utc_now(),
             )
@@ -565,6 +577,7 @@ class RemoteSandboxService(SandboxService):
             environment = await self._init_environment(sandbox_spec, sandbox_id)
             if extra_env:
                 environment.update(extra_env)
+            configure_runtime_subscription(environment, self.web_url)
 
             # Prepare start request
             start_request = await self.build_sandbox_start_request(
@@ -1043,7 +1056,9 @@ class RemoteSandboxService(SandboxService):
         if max_num_sandboxes < 0:
             raise ValueError('max_num_sandboxes must not be negative')
 
-        running = await self._get_user_running_sandboxes()
+        quota_service = await self._owner_quota_service()
+        assert isinstance(quota_service, RemoteSandboxService)
+        running = await quota_service._get_user_running_sandboxes()
         if exclude_id is not None:
             running = [sandbox for sandbox in running if sandbox.id != exclude_id]
 
@@ -1055,7 +1070,7 @@ class RemoteSandboxService(SandboxService):
         paused_ids: list[str] = []
         for sandbox in running[:num_to_pause]:
             try:
-                if await self.pause_sandbox(sandbox.id):
+                if await quota_service.pause_sandbox(sandbox.id):
                     paused_ids.append(sandbox.id)
             except Exception:
                 pass

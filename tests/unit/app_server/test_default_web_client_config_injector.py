@@ -1552,6 +1552,22 @@ class TestSurfacedACPProviders:
 
         assert set(SURFACED_ACP_PROVIDERS) <= set(ACP_PROVIDERS)
 
+    def test_optional_model_metadata_matches_installed_sdk(self):
+        from openhands.app_server.web_client.default_web_client_config_injector import (
+            DefaultWebClientConfigInjector,
+        )
+        from openhands.sdk.settings import ACP_PROVIDERS
+
+        for entry in DefaultWebClientConfigInjector().acp_providers:
+            provider = ACP_PROVIDERS[entry.key]
+            assert entry.default_model == (
+                getattr(provider, 'default_model', None) or None
+            )
+            assert [(m.id, m.label) for m in entry.available_models] == [
+                (m.id, m.label)
+                for m in (getattr(provider, 'available_models', None) or [])
+            ]
+
 
 class TestGetProviderDefaultHosts:
     """Test cases for _get_provider_default_hosts helper function."""

@@ -50,6 +50,8 @@ class SandboxInfo(BaseModel):
 
     id: str
     created_by_user_id: str | None
+    workspace_id: str | None = Field(default=None, exclude=True)
+    subscription_broker_ready: bool = Field(default=False, exclude=True)
     sandbox_spec_id: str
     status: SandboxStatus
     session_api_key: str | None = Field(

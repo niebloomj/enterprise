@@ -66,6 +66,11 @@ class SandboxUserContext(SpecifyUserContext):
     sandbox_id: str
 
 
+@dataclass(frozen=True)
+class SandboxQuotaUserContext(SpecifyUserContext):
+    """Internal owner-only context used for sandbox limit enforcement."""
+
+
 USER_CONTEXT_ATTR = 'user_context'
 ADMIN = SpecifyUserContext(user_id=None)
 

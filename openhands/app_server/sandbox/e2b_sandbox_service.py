@@ -55,10 +55,15 @@ from openhands.app_server.sandbox.sandbox_store import (
     get_stored_sandbox_by_session_api_key,
     hash_session_api_key,
     require_user_id,
+    sandbox_workspace_id,
     search_stored_sandboxes,
 )
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.user.specifiy_user_context import ADMIN
+from server.openai_subscription_config import (
+    cloud_subscription_enabled,
+    configure_runtime_subscription,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -297,6 +302,8 @@ class E2BSandboxService(ManagedSandboxService):
         return SandboxInfo(
             id=stored_sandbox.id,
             created_by_user_id=stored_sandbox.created_by_user_id,
+            workspace_id=stored_sandbox.workspace_id,
+            subscription_broker_ready=bool(stored_sandbox.subscription_broker_ready),
             sandbox_spec_id=stored_sandbox.sandbox_spec_id,
             status=status,
             session_api_key=session_api_key,
@@ -411,6 +418,7 @@ class E2BSandboxService(ManagedSandboxService):
         # Every sandbox has an owner. Check before pause_old_sandboxes, which
         # would reach every user's sandboxes as ADMIN.
         user_id = await require_user_id(self.user_context)
+        workspace_id = await sandbox_workspace_id(self.user_context)
 
         # Enforce sandbox limits by cleaning up old sandboxes
         await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
@@ -470,6 +478,9 @@ class E2BSandboxService(ManagedSandboxService):
         stored_sandbox = self._new_stored_sandbox(
             id=e2b_sandbox_id,
             created_by_user_id=user_id,
+            workspace_id=workspace_id,
+            subscription_broker_ready=cloud_subscription_enabled()
+            and bool(self.web_url),
             sandbox_spec_id=sandbox_spec.id,
             session_api_key_hash=hash_session_api_key(session_api_key),
             session_api_key=SecretStr(session_api_key),
@@ -494,6 +505,9 @@ class E2BSandboxService(ManagedSandboxService):
         return SandboxInfo(
             id=e2b_sandbox_id,
             created_by_user_id=user_id,
+            workspace_id=workspace_id,
+            subscription_broker_ready=cloud_subscription_enabled()
+            and bool(self.web_url),
             sandbox_spec_id=sandbox_spec.id,
             status=SandboxStatus.RUNNING,
             session_api_key=session_api_key,
@@ -616,6 +630,7 @@ class E2BSandboxService(ManagedSandboxService):
         body['env'].update(self._lifecycle_env())
         if extra_env:
             body['env'].update(extra_env)
+        configure_runtime_subscription(body['env'], self.web_url)
 
         cors_origins = []
         if self.web_url:

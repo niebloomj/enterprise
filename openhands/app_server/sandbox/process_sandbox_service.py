@@ -45,6 +45,7 @@ from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
+from server.openai_subscription_config import configure_runtime_subscription
 
 _logger = logging.getLogger(__name__)
 
@@ -127,6 +128,7 @@ class ProcessSandboxService(SandboxService):
         env.update(sandbox_spec.initial_env)
         if extra_env:
             env.update(extra_env)
+        configure_runtime_subscription(env, None)
         env['SESSION_API_KEY'] = session_api_key
 
         # Prepare command arguments

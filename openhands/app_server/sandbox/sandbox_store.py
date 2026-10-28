@@ -10,6 +10,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import SecretStr
 from sqlalchemy import Index, Select, String, func, select
@@ -17,9 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.app_server.errors import AuthError
-from openhands.app_server.user.specifiy_user_context import ADMIN
+from openhands.app_server.user.specifiy_user_context import (
+    ADMIN,
+    SandboxQuotaUserContext,
+    SandboxUserContext,
+)
 from openhands.app_server.user.user_context import UserContext
 from openhands.app_server.utils.sql_utils import Base, StoredSecretStr, UtcDateTime
+from server.openai_subscription_config import cloud_subscription_enabled
 
 REMOTE_BACKEND = 'remote'
 DOCKER_BACKEND = 'docker'
@@ -76,6 +82,10 @@ class StoredSandbox(Base):
     backend: Mapped[str] = mapped_column(String, server_default=REMOTE_BACKEND)
     created_by_user_id: Mapped[str | None] = mapped_column(
         String, nullable=True, index=True
+    )
+    workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    subscription_broker_ready: Mapped[bool] = mapped_column(
+        nullable=False, server_default='false', default=False
     )
     sandbox_spec_id: Mapped[str] = mapped_column(String, index=True)
     session_api_key_hash: Mapped[str | None] = mapped_column(
@@ -135,6 +145,19 @@ async def require_user_id(user_context: UserContext) -> str:
     return user_id
 
 
+async def sandbox_workspace_id(user_context: UserContext) -> str | None:
+    """Resolve the trusted request workspace for a newly created sandbox."""
+    if user_context == ADMIN:
+        return None
+    getter = getattr(user_context, 'get_effective_org_id', None)
+    workspace = await getter() if callable(getter) else None
+    if isinstance(workspace, UUID):
+        return str(workspace)
+    if cloud_subscription_enabled():
+        raise AuthError('Workspace authentication required')
+    return None
+
+
 async def secure_select(
     user_context: UserContext, backend: str
 ) -> Select[tuple[StoredSandbox]]:
@@ -148,7 +171,21 @@ async def secure_select(
     if user_context == ADMIN:
         return query
     user_id = await require_user_id(user_context)
-    return query.where(StoredSandbox.created_by_user_id == user_id)
+    query = query.where(StoredSandbox.created_by_user_id == user_id)
+    if isinstance(user_context, SandboxQuotaUserContext):
+        return query
+    if isinstance(user_context, SandboxUserContext):
+        return query.where(StoredSandbox.id == user_context.sandbox_id)
+    workspace_id = await sandbox_workspace_id(user_context)
+    if not cloud_subscription_enabled():
+        return query.where(
+            (~StoredSandbox.subscription_broker_ready)
+            | (StoredSandbox.workspace_id == workspace_id)
+        )
+    return query.where(
+        (StoredSandbox.workspace_id == workspace_id)
+        | StoredSandbox.workspace_id.is_(None)
+    )
 
 
 async def get_stored_sandbox(

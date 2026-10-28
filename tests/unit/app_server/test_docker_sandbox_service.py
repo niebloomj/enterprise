@@ -12,6 +12,7 @@ This module tests the Docker sandbox service implementation, focusing on:
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -524,6 +525,35 @@ class TestDockerSandboxService:
         # Execute / Verify
         with pytest.raises(SandboxError, match='Could not read container'):
             await service.get_sandbox('oh-test-abc123')
+
+    async def test_cloud_broker_environment_and_workspace_are_server_owned(
+        self, service, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        workspace_id = uuid4()
+        service.user_context.get_effective_org_id.return_value = workspace_id
+        container = MagicMock()
+        container.name = 'oh-test-cloud'
+        container.status = 'running'
+        container.attrs = {'Config': {'Env': []}, 'NetworkSettings': {'Ports': {}}}
+        service.docker_client.containers.run.return_value = container
+        sandbox = await service.start_sandbox(
+            sandbox_id='cloud',
+            extra_env={
+                'OH_OPENAI_SUBSCRIPTION_MODE': 'local',
+                'OH_OPENAI_SUBSCRIPTION_BROKER_URL': 'https://attacker.example',
+            },
+        )
+        env = service.docker_client.containers.run.call_args.kwargs['environment']
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
+        assert (
+            env['OH_OPENAI_SUBSCRIPTION_BROKER_URL']
+            == 'http://host.docker.internal:3000/api/llm/subscription/openai/runtime/token'
+        )
+        assert sandbox.workspace_id == str(workspace_id)
+        assert sandbox.subscription_broker_ready is True
+        stored = await service.db_session.get(StoredSandbox, sandbox.id)
+        assert stored.subscription_broker_ready is True
 
     @patch('openhands.app_server.sandbox.docker_sandbox_service.base62.encodebytes')
     @patch('os.urandom')

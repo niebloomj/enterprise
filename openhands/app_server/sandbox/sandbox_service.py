@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -15,6 +16,10 @@ from openhands.app_server.sandbox.sandbox_models import (
     SandboxStatus,
 )
 from openhands.app_server.services.injector import Injector
+from openhands.app_server.user.specifiy_user_context import (
+    ADMIN,
+    SandboxQuotaUserContext,
+)
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
@@ -417,6 +422,17 @@ class SandboxService(ABC):
         """
         return True
 
+    async def _owner_quota_service(self) -> 'SandboxService':
+        context = getattr(self, 'user_context', None)
+        if context is None or context == ADMIN:
+            return self
+        user_id = await context.get_user_id()
+        if not user_id:
+            return self
+        service = copy.copy(self)
+        service.user_context = SandboxQuotaUserContext(user_id)  # type: ignore[attr-defined]
+        return service
+
     async def pause_old_sandboxes(
         self, max_num_sandboxes: int, exclude_id: str | None = None
     ) -> list[str]:
@@ -434,9 +450,10 @@ class SandboxService(ABC):
         if max_num_sandboxes < 0:
             raise ValueError('max_num_sandboxes must not be negative')
 
-        # Get all running sandboxes (iterate through all pages)
+        # Quotas remain per owner even though normal reads are workspace-scoped.
+        quota_service = await self._owner_quota_service()
         running_sandboxes = []
-        async for sandbox in page_iterator(self.search_sandboxes, limit=100):
+        async for sandbox in page_iterator(quota_service.search_sandboxes, limit=100):
             if sandbox.id == exclude_id:
                 continue
             if sandbox.status == SandboxStatus.RUNNING:
@@ -457,7 +474,7 @@ class SandboxService(ABC):
         paused_sandbox_ids = []
         for sandbox in sandboxes_to_pause:
             try:
-                success = await self.pause_sandbox(sandbox.id)
+                success = await quota_service.pause_sandbox(sandbox.id)
                 if success:
                     paused_sandbox_ids.append(sandbox.id)
             except Exception:

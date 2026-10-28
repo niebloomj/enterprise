@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 import pytest
 from pydantic import SecretStr
@@ -113,6 +114,100 @@ class TestHashSessionApiKey:
 
 
 class TestScoping:
+    async def test_workspace_scope_excludes_other_and_legacy_sandboxes(
+        self, db_session, store, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        personal, team = uuid4(), uuid4()
+
+        def row(name, workspace, key):
+            return StoredSandbox(
+                id=name,
+                backend=DOCKER_BACKEND,
+                created_by_user_id=OWNER_ID,
+                workspace_id=str(workspace) if workspace else None,
+                sandbox_spec_id='spec-1',
+                session_api_key_hash=hash_session_api_key(key),
+                created_at=CREATED_AT,
+            )
+
+        await store(
+            row('personal', personal, 'personal-key'),
+            row('team', team, 'team-key'),
+            row('legacy', None, 'legacy-key'),
+        )
+        context = _user_context(OWNER_ID)
+        context.get_effective_org_id.return_value = personal
+        page = await search_stored_sandboxes(
+            db_session, context, DOCKER_BACKEND, None, 100
+        )
+        assert {item.id for item in page.items} == {'personal', 'legacy'}
+        assert (
+            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'team')
+            is None
+        )
+        assert (
+            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'legacy')
+            is not None
+        )
+        assert (
+            await get_stored_sandbox_by_session_api_key(
+                db_session, context, DOCKER_BACKEND, 'team-key'
+            )
+            is None
+        )
+        context.get_effective_org_id.return_value = team
+        page = await search_stored_sandboxes(
+            db_session, context, DOCKER_BACKEND, None, 100
+        )
+        assert {item.id for item in page.items} == {'team', 'legacy'}
+        assert (
+            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'personal')
+            is None
+        )
+        admin_page = await search_stored_sandboxes(
+            db_session, ADMIN, DOCKER_BACKEND, None, 100
+        )
+        assert {item.id for item in admin_page.items} == {'personal', 'team', 'legacy'}
+
+    async def test_disabled_flag_preserves_legacy_reuse_but_not_broker_sandboxes(
+        self, db_session, store, monkeypatch
+    ):
+        monkeypatch.delenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', raising=False)
+        personal, team = uuid4(), uuid4()
+        old = _stored('old')
+        old.workspace_id = str(personal)
+        broker = _stored('broker')
+        broker.workspace_id = str(personal)
+        broker.subscription_broker_ready = True
+        await store(old, broker)
+        context = _user_context(OWNER_ID)
+        context.get_effective_org_id.return_value = team
+        page = await search_stored_sandboxes(
+            db_session, context, DOCKER_BACKEND, None, 100
+        )
+        assert [item.id for item in page.items] == ['old']
+        assert (
+            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'broker')
+            is None
+        )
+        context.get_effective_org_id.return_value = personal
+        page = await search_stored_sandboxes(
+            db_session, context, DOCKER_BACKEND, None, 100
+        )
+        assert {item.id for item in page.items} == {'old', 'broker'}
+
+    async def test_workspace_scope_requires_effective_org(
+        self, db_session, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        context = _user_context(OWNER_ID)
+        context.get_effective_org_id.return_value = None
+        with pytest.raises(AuthError):
+            await search_stored_sandboxes(
+                db_session, context, DOCKER_BACKEND, None, 100
+            )
+
     async def test_owner_sees_their_own(self, db_session, store):
         await store(_stored('sb-1'))
 

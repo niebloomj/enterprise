@@ -458,6 +458,31 @@ class TestStartSandbox:
 
 class TestInitHandshake:
     @pytest.mark.asyncio
+    async def test_cloud_broker_replaces_caller_environment(
+        self, k8s, db_session, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        agent_server = FakeAgentServer()
+        context = _user_context(OWNER_ID)
+        workspace_id = uuid.uuid4()
+        context.get_effective_org_id.return_value = workspace_id
+        sandbox = await _service(
+            db_session, k8s, user_context=context, httpx_client=agent_server
+        ).start_sandbox(
+            extra_env={
+                'OH_OPENAI_SUBSCRIPTION_MODE': 'local',
+                'OH_OPENAI_SUBSCRIPTION_BROKER_URL': 'https://attacker.example',
+            }
+        )
+        stored = await db_session.get(StoredSandbox, sandbox.id)
+        assert stored.workspace_id == str(workspace_id)
+        env = agent_server.init_post_bodies[0]['env']
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
+        assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'] == (
+            f'{WEB_URL}/api/llm/subscription/openai/runtime/token'
+        )
+
+    @pytest.mark.asyncio
     async def test_init_body_is_accepted_by_the_agent_server(self, k8s, db_session):
         agent_server = FakeAgentServer()
 
