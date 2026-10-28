@@ -1,9 +1,11 @@
 """Tests for resolve_profile_llm in openhands.app_server.settings.llm_profiles."""
 
+import pytest
 from pydantic import SecretStr
 
 from openhands.app_server.settings.llm_profiles import resolve_profile_llm
 from openhands.sdk.llm import LLM
+from openhands.sdk.llm.auth import credentials as sdk_credentials
 
 MANAGED_URL = 'http://openhands-litellm.openhands.svc.cluster.local:4000'
 BYOR_URL = 'https://api.anthropic.com'
@@ -111,6 +113,32 @@ class TestByorProfiles:
             fallback_api_key=CURRENT_KEY,
         )
         assert _key_of(resolved) == CURRENT_KEY.get_secret_value()
+
+
+class TestSubscriptionProfiles:
+    def test_subscription_never_inherits_fallback_key(self):
+        profile = LLM(model='openai/gpt-5.5', auth_type='subscription')
+        resolved = resolve_profile_llm(
+            profile, managed_proxy_url=MANAGED_URL, fallback_api_key=CURRENT_KEY
+        )
+        assert resolved.api_key is None
+
+    @pytest.mark.skipif(
+        not hasattr(sdk_credentials, 'SubscriptionBrokerCredentialStore'),
+        reason='requires broker-capable SDK',
+    )
+    def test_does_not_inject_unrelated_managed_key(self, monkeypatch):
+        monkeypatch.setenv('OH_OPENAI_SUBSCRIPTION_MODE', 'disabled')
+        profile = LLM.from_persisted(
+            {'model': 'openai/gpt-5.5', 'auth_type': 'subscription'}
+        )
+        resolved = resolve_profile_llm(
+            profile, managed_proxy_url=MANAGED_URL, fallback_api_key=CURRENT_KEY
+        )
+        assert resolved.api_key is None
+        assert resolved.base_url == profile.base_url
+        assert resolved.is_subscription
+        assert resolved.stream is True
 
 
 class TestStreamingIsForced:

@@ -55,13 +55,12 @@ from openhands.app_server.sandbox.sandbox_store import (
     get_stored_sandbox_by_session_api_key,
     hash_session_api_key,
     require_user_id,
-    sandbox_workspace_id,
+    sandbox_start_workspace_id,
     search_stored_sandboxes,
 )
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.user.specifiy_user_context import ADMIN
 from server.openai_subscription_config import (
-    cloud_subscription_enabled,
     configure_runtime_subscription,
 )
 
@@ -402,6 +401,8 @@ class E2BSandboxService(ManagedSandboxService):
         sandbox_spec_id: str | None = None,
         sandbox_id: str | None = None,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> SandboxInfo:
         """Start a new sandbox and initialize its agent server.
 
@@ -418,7 +419,11 @@ class E2BSandboxService(ManagedSandboxService):
         # Every sandbox has an owner. Check before pause_old_sandboxes, which
         # would reach every user's sandboxes as ADMIN.
         user_id = await require_user_id(self.user_context)
-        workspace_id = await sandbox_workspace_id(self.user_context)
+        workspace_id = await sandbox_start_workspace_id(
+            self.user_context,
+            subscription_broker=subscription_broker,
+            broker_url=self.web_url,
+        )
 
         # Enforce sandbox limits by cleaning up old sandboxes
         await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
@@ -479,8 +484,7 @@ class E2BSandboxService(ManagedSandboxService):
             id=e2b_sandbox_id,
             created_by_user_id=user_id,
             workspace_id=workspace_id,
-            subscription_broker_ready=cloud_subscription_enabled()
-            and bool(self.web_url),
+            subscription_broker_ready=subscription_broker,
             sandbox_spec_id=sandbox_spec.id,
             session_api_key_hash=hash_session_api_key(session_api_key),
             session_api_key=SecretStr(session_api_key),
@@ -491,7 +495,11 @@ class E2BSandboxService(ManagedSandboxService):
             self.db_session.add(stored_sandbox)
             await self.db_session.flush()
             await self._initialize_agent_server(
-                e2b_sandbox_id, sandbox_spec, session_api_key, extra_env=extra_env
+                e2b_sandbox_id,
+                sandbox_spec,
+                session_api_key,
+                extra_env=extra_env,
+                subscription_broker=subscription_broker,
             )
         except BaseException:
             # Init is never retried: the rotated secret_key means a second
@@ -506,8 +514,7 @@ class E2BSandboxService(ManagedSandboxService):
             id=e2b_sandbox_id,
             created_by_user_id=user_id,
             workspace_id=workspace_id,
-            subscription_broker_ready=cloud_subscription_enabled()
-            and bool(self.web_url),
+            subscription_broker_ready=subscription_broker,
             sandbox_spec_id=sandbox_spec.id,
             status=SandboxStatus.RUNNING,
             session_api_key=session_api_key,
@@ -530,6 +537,8 @@ class E2BSandboxService(ManagedSandboxService):
         sandbox_spec: E2BSandboxSpecInfo,
         session_api_key: str,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> None:
         """Wait for the dormant agent server and hand it its runtime config."""
         agent_server_url = self._host_url(
@@ -542,7 +551,12 @@ class E2BSandboxService(ManagedSandboxService):
         try:
             response = await self.httpx_client.post(
                 f'{agent_server_url}/api/init',
-                json=self._build_init_request(sandbox_spec, session_api_key, extra_env),
+                json=self._build_init_request(
+                    sandbox_spec,
+                    session_api_key,
+                    extra_env,
+                    subscription_broker=subscription_broker,
+                ),
                 headers=headers,
             )
         except httpx.HTTPError as exc:
@@ -596,6 +610,8 @@ class E2BSandboxService(ManagedSandboxService):
         sandbox_spec: E2BSandboxSpecInfo,
         session_api_key: str,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> dict[str, Any]:
         """Build the ``POST /api/init`` body.
 
@@ -630,7 +646,9 @@ class E2BSandboxService(ManagedSandboxService):
         body['env'].update(self._lifecycle_env())
         if extra_env:
             body['env'].update(extra_env)
-        configure_runtime_subscription(body['env'], self.web_url)
+        configure_runtime_subscription(
+            body['env'], self.web_url, broker=subscription_broker
+        )
 
         cors_origins = []
         if self.web_url:

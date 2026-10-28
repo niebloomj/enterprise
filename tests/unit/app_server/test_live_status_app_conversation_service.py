@@ -51,7 +51,11 @@ from openhands.app_server.app_conversation.live_status_app_conversation_service 
     effective_disabled_skills,
     get_sandbox_web_url,
 )
-from openhands.app_server.errors import ACPProviderNotAvailableError, SandboxError
+from openhands.app_server.errors import (
+    ACPProviderNotAvailableError,
+    AuthError,
+    SandboxError,
+)
 from openhands.app_server.event_callback.memory_change_callback_processor import (
     MemoryChangeCallbackProcessor,
 )
@@ -90,6 +94,7 @@ from openhands.app_server.user_auth.user_auth import AuthType
 from openhands.app_server.utils.redis_lock import RedisLockUnavailable
 from openhands.sdk import Agent, AgentContext, Event
 from openhands.sdk.llm import LLM
+from openhands.sdk.llm.auth import credentials as sdk_credentials
 from openhands.sdk.secret import LookupSecret, StaticSecret
 from openhands.sdk.settings import (
     ACP_PROVIDERS,
@@ -3473,18 +3478,20 @@ class TestLiveStatusAppConversationService:
         assert secrets == existing_secrets
 
     @pytest.mark.asyncio
-    async def test_new_conversation_cannot_reuse_legacy_or_cross_workspace_sandboxes(
+    async def test_legacy_reuse_is_preserved_except_for_subscription_launches(
         self, monkeypatch
     ):
         monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
         org = uuid4()
-        self.mock_user_context.get_user_id = AsyncMock(return_value='owner')
+        owner = str(org)
+        self.mock_user_context.get_user_id = AsyncMock(return_value=owner)
         self.mock_user_context.get_effective_org_id = AsyncMock(return_value=org)
+        self.mock_sandbox_service.wait_for_sandbox_running = AsyncMock()
 
         def sandbox(sandbox_id, workspace_id, broker_ready):
             return SandboxInfo(
                 id=sandbox_id,
-                created_by_user_id='owner',
+                created_by_user_id=owner,
                 workspace_id=workspace_id,
                 subscription_broker_ready=broker_ready,
                 sandbox_spec_id='spec',
@@ -3493,22 +3500,138 @@ class TestLiveStatusAppConversationService:
             )
 
         legacy = sandbox('legacy', None, False)
-        previous = sandbox('previous', str(org), False)
+        previous = sandbox('previous', str(uuid4()), False)
         foreign = sandbox('foreign', str(uuid4()), True)
         eligible = sandbox('eligible', str(org), True)
         self.mock_sandbox_service.search_sandboxes = AsyncMock(
             return_value=SandboxPage(items=[legacy, previous, foreign, eligible])
         )
-        assert (await self.service._find_running_sandbox_for_user()).id == 'eligible'
-        for item in (legacy, previous, foreign):
+        assert (await self.service._find_running_sandbox_for_user()).id == 'legacy'
+        assert (
+            await self.service._find_running_sandbox_for_user(require_subscription=True)
+        ).id == 'eligible'
+        for item in (legacy, previous):
             self.mock_sandbox_service.get_sandbox = AsyncMock(return_value=item)
             task = AppConversationStartTask(
-                created_by_user_id='owner',
+                created_by_user_id=owner,
                 request=AppConversationStartRequest(sandbox_id=item.id),
             )
-            with pytest.raises(SandboxError):
-                async for _ in self.service._wait_for_sandbox_start(task):
+            assert [
+                update async for update in self.service._wait_for_sandbox_start(task)
+            ][-1].sandbox_id == item.id
+            with pytest.raises(SandboxError, match='subscription'):
+                async for _ in self.service._wait_for_sandbox_start(
+                    task, require_subscription=True
+                ):
                     pass
+        self.mock_sandbox_service.get_sandbox = AsyncMock(return_value=foreign)
+        task = AppConversationStartTask(
+            created_by_user_id=owner,
+            request=AppConversationStartRequest(sandbox_id=foreign.id),
+        )
+        with pytest.raises(SandboxError):
+            async for _ in self.service._wait_for_sandbox_start(task):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_subscription_start_creates_broker_sandbox_when_only_legacy_exists(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        owner = uuid4()
+        self.mock_user_context.get_user_id = AsyncMock(return_value=str(owner))
+        self.mock_user_context.get_effective_org_id = AsyncMock(return_value=owner)
+        legacy = SandboxInfo(
+            id='legacy',
+            created_by_user_id=str(owner),
+            sandbox_spec_id='spec',
+            status=SandboxStatus.RUNNING,
+            session_api_key='key',
+        )
+        broker = SandboxInfo(
+            id='broker',
+            created_by_user_id=str(owner),
+            workspace_id=str(owner),
+            subscription_broker_ready=True,
+            sandbox_spec_id='spec',
+            status=SandboxStatus.RUNNING,
+            session_api_key='key',
+        )
+        self.mock_sandbox_service.search_sandboxes = AsyncMock(
+            return_value=SandboxPage(items=[legacy])
+        )
+        self.mock_sandbox_service.start_sandbox = AsyncMock(return_value=broker)
+        self.mock_sandbox_service.wait_for_sandbox_running = AsyncMock()
+        task = AppConversationStartTask(
+            created_by_user_id=str(owner), request=AppConversationStartRequest()
+        )
+        updates = [
+            update
+            async for update in self.service._wait_for_sandbox_start(
+                task, require_subscription=True
+            )
+        ]
+        assert updates[-1].sandbox_id == 'broker'
+        self.mock_sandbox_service.start_sandbox.assert_awaited_once_with(
+            sandbox_id=None, subscription_broker=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_subscription_start_is_rejected_in_team_workspace(self, monkeypatch):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        owner = str(uuid4())
+        self.mock_user_context.get_user_id = AsyncMock(return_value=owner)
+        self.mock_user_context.get_effective_org_id = AsyncMock(return_value=uuid4())
+        task = AppConversationStartTask(
+            created_by_user_id=owner, request=AppConversationStartRequest()
+        )
+        with pytest.raises(AuthError, match='personal workspace'):
+            async for _ in self.service._wait_for_sandbox_start(
+                task, require_subscription=True
+            ):
+                pass
+        self.mock_sandbox_service.start_sandbox.assert_not_called()
+
+    @pytest.mark.parametrize('requested_profile', [False, True])
+    @pytest.mark.skipif(
+        not hasattr(sdk_credentials, 'SubscriptionBrokerCredentialStore'),
+        reason='requires broker-capable SDK',
+    )
+    @pytest.mark.asyncio
+    async def test_subscription_launch_requests_broker_after_profile_resolution(
+        self, requested_profile, monkeypatch
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        monkeypatch.setenv('OH_OPENAI_SUBSCRIPTION_MODE', 'disabled')
+        subscription = LLM.from_persisted(
+            {'model': 'openai/gpt-5.5', 'auth_type': 'subscription'}
+        )
+        profiles = LLMProfiles()
+        profiles.save('subscription', subscription)
+        initial = LLM(model='openai/gpt-4o') if requested_profile else subscription
+        self.mock_user = UserInfo(
+            id='member',
+            agent_settings=OpenHandsAgentSettings(llm=initial),
+            llm_profiles=profiles,
+        )
+        self.mock_user_context.get_user_id = AsyncMock(return_value='member')
+        self.mock_user_context.get_user_info = AsyncMock(return_value=self.mock_user)
+        self.mock_user_auth.get_auth_type.return_value = AuthType.BEARER
+        calls = []
+
+        async def wait(task, **kwargs):
+            calls.append(kwargs)
+            yield task
+
+        self.service._wait_for_sandbox_start = wait
+        request = AppConversationStartRequest(
+            llm_profile='subscription' if requested_profile else None
+        )
+        launch = self.service._start_app_conversation(request)
+        await anext(launch)
+        await anext(launch)
+        await launch.aclose()
+        assert calls == [{'require_subscription': True}]
 
     @pytest.mark.asyncio
     async def test_find_running_sandbox_for_user_found(self):
@@ -3522,6 +3645,7 @@ class TestLiveStatusAppConversationService:
         running_sandbox.id = 'sandbox_1'
         running_sandbox.status = SandboxStatus.RUNNING
         running_sandbox.created_by_user_id = user_id
+        running_sandbox.subscription_broker_ready = False
 
         other_user_sandbox = Mock(spec=SandboxInfo)
         other_user_sandbox.id = 'sandbox_2'

@@ -8,12 +8,14 @@ def cloud_subscription_enabled() -> bool:
     return os.getenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', '').lower() in ('1', 'true')
 
 
-def configure_runtime_subscription(env: dict[str, str], web_url: str | None) -> None:
+def configure_runtime_subscription(
+    env: dict[str, str], web_url: str | None, *, broker: bool = False
+) -> None:
     if not cloud_subscription_enabled():
         return
     env.pop(BROKER_URL, None)
     env[MODE] = 'disabled'
-    if web_url:
+    if broker and web_url:
         env[MODE] = 'broker'
         env[BROKER_URL] = (
             f'{web_url.rstrip("/")}/api/llm/subscription/openai/runtime/token'

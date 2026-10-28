@@ -52,7 +52,7 @@ from openhands.app_server.sandbox.sandbox_store import (
     get_stored_sandbox_by_session_api_key,
     hash_session_api_key,
     require_user_id,
-    sandbox_workspace_id,
+    sandbox_start_workspace_id,
     search_stored_sandboxes,
 )
 from openhands.app_server.services.injector import InjectorState
@@ -60,7 +60,6 @@ from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
 from server.openai_subscription_config import (
-    cloud_subscription_enabled,
     configure_runtime_subscription,
 )
 
@@ -442,12 +441,19 @@ class DockerSandboxService(ManagedSandboxService):
         sandbox_spec_id: str | None = None,
         sandbox_id: str | None = None,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> SandboxInfo:
         """Start a new sandbox."""
         # Every sandbox has an owner. Check before pause_old_sandboxes, which
         # would reach every user's sandboxes as ADMIN.
         user_id = await require_user_id(self.user_context)
-        workspace_id = await sandbox_workspace_id(self.user_context)
+        broker_url = f'http://host.docker.internal:{self.host_port}'
+        workspace_id = await sandbox_start_workspace_id(
+            self.user_context,
+            subscription_broker=subscription_broker,
+            broker_url=broker_url,
+        )
 
         # Warn about port collision risk when using host network mode with multiple sandboxes
         if self.use_host_network and self.max_num_sandboxes > 1:
@@ -482,9 +488,7 @@ class DockerSandboxService(ManagedSandboxService):
         if extra_env:
             env_vars.update(extra_env)
         env_vars[SESSION_API_KEY_VARIABLE] = session_api_key
-        configure_runtime_subscription(
-            env_vars, f'http://host.docker.internal:{self.host_port}'
-        )
+        configure_runtime_subscription(env_vars, broker_url, broker=subscription_broker)
         env_vars[WEBHOOK_CALLBACK_VARIABLE] = (
             f'http://host.docker.internal:{self.host_port}/api/v1/webhooks'
         )
@@ -564,7 +568,7 @@ class DockerSandboxService(ManagedSandboxService):
             id=container_name,
             created_by_user_id=user_id,
             workspace_id=workspace_id,
-            subscription_broker_ready=cloud_subscription_enabled(),
+            subscription_broker_ready=subscription_broker,
             sandbox_spec_id=sandbox_spec.id,
             session_api_key_hash=hash_session_api_key(session_api_key),
         )

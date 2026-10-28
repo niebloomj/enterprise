@@ -100,6 +100,7 @@ from openhands.sdk.agent.acp_file_credentials import is_valid_codex_auth
 from openhands.sdk.settings import ACPAgentSettings
 from openhands.sdk.skills import KeywordTrigger, TaskTrigger
 from openhands.sdk.workspace.remote.async_remote_workspace import AsyncRemoteWorkspace
+from server.openai_subscription_config import cloud_subscription_enabled
 
 # Handle anext compatibility for Python < 3.10
 if sys.version_info >= (3, 10):
@@ -828,6 +829,22 @@ async def switch_conversation_profile(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail='Sandbox is paused; resume it before switching profiles.',
+        )
+    if (
+        cloud_subscription_enabled()
+        and profile_llm.auth_type == 'subscription'
+        and (
+            not ctx.sandbox.subscription_broker_ready
+            or not ctx.sandbox.created_by_user_id
+            or ctx.sandbox.workspace_id != ctx.sandbox.created_by_user_id
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                'OpenAI subscription requires a compatible personal sandbox. '
+                'Start a new conversation with this profile.'
+            ),
         )
 
     llm_payload = profile_llm.model_dump(

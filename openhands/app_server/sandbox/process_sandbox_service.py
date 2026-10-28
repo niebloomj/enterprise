@@ -314,8 +314,14 @@ class ProcessSandboxService(SandboxService):
         sandbox_spec_id: str | None = None,
         sandbox_id: str | None = None,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> SandboxInfo:
         """Start a new sandbox."""
+        if subscription_broker:
+            raise SandboxError(
+                'OpenAI subscription is unavailable in process sandboxes'
+            )
         # Get sandbox spec
         sandbox_spec = await resolve_sandbox_spec(
             sandbox_spec_id,

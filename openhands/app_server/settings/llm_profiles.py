@@ -58,6 +58,8 @@ def resolve_profile_llm(
     dies at the next rotation with no path back. The org's current key is the
     only authoritative one for anything pointed at the managed proxy.
     """
+    if profile_llm.auth_type == 'subscription':
+        return profile_llm.model_copy(update={'api_key': None, 'stream': True})
     resolved = profile_llm.model_copy(
         update={
             'base_url': resolve_llm_base_url(

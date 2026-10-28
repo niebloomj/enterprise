@@ -255,6 +255,8 @@ class SandboxService(ABC):
         sandbox_spec_id: str | None = None,
         sandbox_id: str | None = None,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> SandboxInfo:
         """Begin the process of starting a sandbox.
 

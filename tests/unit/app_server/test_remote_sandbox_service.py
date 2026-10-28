@@ -391,10 +391,8 @@ class TestEnvironmentInitialization:
             working_dir='/workspace',
         )
         env = await remote_sandbox_service._init_environment(spec, 'sandbox')
-        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
-        assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'] == (
-            'https://web.example.com/api/llm/subscription/openai/runtime/token'
-        )
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'disabled'
+        assert 'OH_OPENAI_SUBSCRIPTION_BROKER_URL' not in env
         assert not any('SESSION_API_KEY' in key for key in env)
 
     @pytest.mark.asyncio

@@ -458,29 +458,39 @@ class TestStartSandbox:
 
 class TestInitHandshake:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize('broker', [False, True])
     async def test_cloud_broker_replaces_caller_environment(
-        self, k8s, db_session, monkeypatch
+        self, k8s, db_session, monkeypatch, broker
     ):
         monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
         agent_server = FakeAgentServer()
         context = _user_context(OWNER_ID)
         workspace_id = uuid.uuid4()
         context.get_effective_org_id.return_value = workspace_id
+        context.get_user_id.return_value = str(workspace_id)
         sandbox = await _service(
             db_session, k8s, user_context=context, httpx_client=agent_server
         ).start_sandbox(
+            subscription_broker=broker,
             extra_env={
                 'OH_OPENAI_SUBSCRIPTION_MODE': 'local',
                 'OH_OPENAI_SUBSCRIPTION_BROKER_URL': 'https://attacker.example',
-            }
+            },
         )
         stored = await db_session.get(StoredSandbox, sandbox.id)
         assert stored.workspace_id == str(workspace_id)
         env = agent_server.init_post_bodies[0]['env']
-        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
-        assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'] == (
-            f'{WEB_URL}/api/llm/subscription/openai/runtime/token'
+        assert stored.subscription_broker_ready is broker
+        assert sandbox.subscription_broker_ready is broker
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == (
+            'broker' if broker else 'disabled'
         )
+        if broker:
+            assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'] == (
+                f'{WEB_URL}/api/llm/subscription/openai/runtime/token'
+            )
+        else:
+            assert 'OH_OPENAI_SUBSCRIPTION_BROKER_URL' not in env
 
     @pytest.mark.asyncio
     async def test_init_body_is_accepted_by_the_agent_server(self, k8s, db_session):
@@ -819,6 +829,34 @@ class TestPauseResume:
         sandbox = await service.get_sandbox(CLAIM_NAME)
         assert sandbox.status == SandboxStatus.RUNNING
         assert sandbox.session_api_key == SESSION_API_KEY
+
+    @pytest.mark.parametrize('broker', [False, True])
+    @pytest.mark.asyncio
+    async def test_resume_restores_only_authorized_broker_configuration(
+        self, k8s, db_session, store, monkeypatch, broker
+    ):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        workspace = uuid.uuid4()
+        row = _stored(created_by_user_id=str(workspace))
+        row.workspace_id = str(workspace)
+        row.subscription_broker_ready = broker
+        await store(row)
+        k8s.add_claim(ready=SUSPENDED)
+        context = _user_context(str(workspace))
+        context.get_effective_org_id.return_value = workspace
+        agent_server = FakeAgentServer()
+        service = _service(
+            db_session, k8s, user_context=context, httpx_client=agent_server
+        )
+        assert await service.resume_sandbox(CLAIM_NAME) is True
+        env = agent_server.init_post_bodies[0]['env']
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == (
+            'broker' if broker else 'disabled'
+        )
+        if broker:
+            assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'].startswith(WEB_URL)
+        else:
+            assert 'OH_OPENAI_SUBSCRIPTION_BROKER_URL' not in env
 
     @pytest.mark.asyncio
     async def test_resume_waits_for_the_new_pod(self, k8s, db_session, store):

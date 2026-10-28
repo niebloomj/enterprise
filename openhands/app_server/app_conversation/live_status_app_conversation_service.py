@@ -125,6 +125,7 @@ from openhands.app_server.sandbox.sandbox_spec_service import (
     SandboxSpecService,
     is_custom_sandbox_spec,
 )
+from openhands.app_server.sandbox.sandbox_store import subscription_sandbox_workspace_id
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.services.jwt_service import JwtService
 from openhands.app_server.settings.llm_profiles import resolve_profile_llm
@@ -752,8 +753,18 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         )
         yield task
 
+        require_subscription = (
+            cloud_subscription_enabled()
+            and isinstance(agent_settings, OpenHandsAgentSettings)
+            and agent_settings.llm.auth_type == 'subscription'
+        )
         try:
-            async for updated_task in self._wait_for_sandbox_start(task):
+            sandbox_start = (
+                self._wait_for_sandbox_start(task, require_subscription=True)
+                if require_subscription
+                else self._wait_for_sandbox_start(task)
+            )
+            async for updated_task in sandbox_start:
                 yield updated_task
 
             # Get the sandbox
@@ -1170,17 +1181,19 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         return result
 
     async def _sandbox_eligible_for_new_conversation(
-        self, sandbox: SandboxInfo
+        self, sandbox: SandboxInfo, *, require_subscription: bool = False
     ) -> bool:
-        if not cloud_subscription_enabled():
-            return True
+        if not sandbox.subscription_broker_ready:
+            return not require_subscription
         getter = getattr(self.user_context, 'get_effective_org_id', None)
-        if not callable(getter) or not sandbox.subscription_broker_ready:
+        if not callable(getter):
             return False
         org_id = await getter()
-        return org_id is not None and sandbox.workspace_id == str(org_id)
+        return isinstance(org_id, UUID) and sandbox.workspace_id == str(org_id)
 
-    async def _find_running_sandbox_for_user(self) -> SandboxInfo | None:
+    async def _find_running_sandbox_for_user(
+        self, *, require_subscription: bool = False
+    ) -> SandboxInfo | None:
         """Find a running sandbox for the current user based on the grouping strategy.
 
         Returns:
@@ -1206,7 +1219,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     if (
                         sandbox.status == SandboxStatus.RUNNING
                         and sandbox.created_by_user_id == user_id
-                        and await self._sandbox_eligible_for_new_conversation(sandbox)
+                        and await self._sandbox_eligible_for_new_conversation(
+                            sandbox, require_subscription=require_subscription
+                        )
                     ):
                         running_sandboxes.append(sandbox)
 
@@ -1348,26 +1363,39 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             return []
 
     async def _wait_for_sandbox_start(
-        self, task: AppConversationStartTask
+        self, task: AppConversationStartTask, *, require_subscription: bool = False
     ) -> AsyncGenerator[AppConversationStartTask, None]:
         """Wait for sandbox to start and return info."""
+        if require_subscription:
+            await subscription_sandbox_workspace_id(self.user_context)
         # Get or create the sandbox
         if not task.request.sandbox_id:
             # First try to find a running sandbox for the current user
-            sandbox = await self._find_running_sandbox_for_user()
+            sandbox = await self._find_running_sandbox_for_user(
+                require_subscription=require_subscription
+            )
             if sandbox is None:
-                # No running sandbox found, start a new one
-
                 # Convert conversation_id to hex string if present
                 sandbox_id_str = (
                     task.request.conversation_id.hex
                     if task.request.conversation_id is not None
                     else None
                 )
-
-                sandbox = await self.sandbox_service.start_sandbox(
-                    sandbox_id=sandbox_id_str,
-                )
+                if require_subscription:
+                    sandbox = await self.sandbox_service.start_sandbox(
+                        sandbox_id=sandbox_id_str, subscription_broker=True
+                    )
+                else:
+                    sandbox = await self.sandbox_service.start_sandbox(
+                        sandbox_id=sandbox_id_str,
+                    )
+                if (
+                    require_subscription
+                    and not await self._sandbox_eligible_for_new_conversation(
+                        sandbox, require_subscription=True
+                    )
+                ):
+                    raise SandboxError('OpenAI subscription sandbox is not available')
             task.sandbox_id = sandbox.id
         else:
             sandbox_info = await self.sandbox_service.get_sandbox(
@@ -1375,7 +1403,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             )
             if sandbox_info is None:
                 raise SandboxError(f'Sandbox not found: {task.request.sandbox_id}')
-            if not await self._sandbox_eligible_for_new_conversation(sandbox_info):
+            if not await self._sandbox_eligible_for_new_conversation(
+                sandbox_info, require_subscription=require_subscription
+            ):
+                if require_subscription:
+                    raise SandboxError(
+                        'OpenAI subscription requires a compatible personal sandbox. '
+                        'Start a new conversation without reusing this sandbox.'
+                    )
                 raise SandboxError('Sandbox cannot be used for a new conversation')
             sandbox = sandbox_info
 

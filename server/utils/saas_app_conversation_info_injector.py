@@ -103,6 +103,11 @@ class SaasSQLAppConversationInfoService(SQLAppConversationInfoService):
         user.current_org_id) when the user is authenticated via SAAS auth,
         otherwise falls back to the user's persisted current_org_id.
         """
+        getter = getattr(self.user_context, 'get_effective_org_id', None)
+        if callable(getter):
+            resolved_org_id = await getter()
+            if isinstance(resolved_org_id, UUID):
+                return resolved_org_id
         user_auth = getattr(self.user_context, 'user_auth', None)
         if user_auth is not None and hasattr(user_auth, 'get_effective_org_id'):
             return await user_auth.get_effective_org_id()

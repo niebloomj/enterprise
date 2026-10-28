@@ -59,7 +59,7 @@ from openhands.app_server.sandbox.sandbox_store import (
     StoredSandbox,
     get_stored_sandbox,
     get_stored_sandbox_by_session_api_key,
-    sandbox_workspace_id,
+    sandbox_start_workspace_id,
     search_stored_sandboxes,
     secure_select,
 )
@@ -78,7 +78,6 @@ from openhands.app_server.utils.docker_utils import (
 )
 from openhands.sdk.utils.paging import page_iterator
 from server.openai_subscription_config import (
-    cloud_subscription_enabled,
     configure_runtime_subscription,
 )
 
@@ -538,11 +537,17 @@ class RemoteSandboxService(SandboxService):
         sandbox_spec_id: str | None = None,
         sandbox_id: str | None = None,
         extra_env: dict[str, str] | None = None,
+        *,
+        subscription_broker: bool = False,
     ) -> SandboxInfo:
         """Start a new sandbox by creating a remote runtime."""
         # get user id (also the quota attribution identity)
         user_id = await self.user_context.get_user_id()
-        workspace_id = await sandbox_workspace_id(self.user_context)
+        workspace_id = await sandbox_start_workspace_id(
+            self.user_context,
+            subscription_broker=subscription_broker,
+            broker_url=self.web_url,
+        )
         quota_reserved = await self._reserve_daily_sandbox_quota(user_id)
         try:
             # Enforce sandbox limits by cleaning up old sandboxes
@@ -566,8 +571,7 @@ class RemoteSandboxService(SandboxService):
                 backend=REMOTE_BACKEND,
                 created_by_user_id=user_id,
                 workspace_id=workspace_id,
-                subscription_broker_ready=cloud_subscription_enabled()
-                and bool(self.web_url),
+                subscription_broker_ready=subscription_broker,
                 sandbox_spec_id=sandbox_spec.id,
                 created_at=utc_now(),
             )
@@ -577,7 +581,9 @@ class RemoteSandboxService(SandboxService):
             environment = await self._init_environment(sandbox_spec, sandbox_id)
             if extra_env:
                 environment.update(extra_env)
-            configure_runtime_subscription(environment, self.web_url)
+            configure_runtime_subscription(
+                environment, self.web_url, broker=subscription_broker
+            )
 
             # Prepare start request
             start_request = await self.build_sandbox_start_request(

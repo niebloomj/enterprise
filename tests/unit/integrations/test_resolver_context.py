@@ -5,9 +5,10 @@ This test focuses on testing the actual ResolverUserContext implementation.
 
 from types import MappingProxyType
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from pydantic import SecretStr
 
 from integrations.resolver_context import ResolverUserContext
@@ -15,10 +16,17 @@ from integrations.resolver_context import ResolverUserContext
 # Import the real classes we want to test
 from openhands.app_server.integrations.provider import CustomSecret, ProviderToken
 from openhands.app_server.integrations.service_types import ProviderType
+from openhands.app_server.sandbox.sandbox_store import sandbox_workspace_id
 from openhands.app_server.secrets.secrets_models import Secrets
 
 # Import the SDK types we need for testing
 from openhands.sdk.secret import SecretSource, StaticSecret
+from server.auth.saas_user_auth import SaasUserAuth
+from server.utils.saas_app_conversation_info_injector import (
+    SaasSQLAppConversationInfoService,
+)
+from storage.org_member import OrgMember
+from storage.role import Role
 
 
 @pytest.fixture
@@ -69,6 +77,43 @@ def test_resolver_org_id_scopes_saas_auth_when_supported():
     ResolverUserContext(saas_user_auth=auth, resolver_org_id=org_id)
 
     assert auth.effective_org_id_override == org_id
+
+
+@pytest.mark.asyncio
+async def test_resolver_workspace_uses_verified_org_for_sandboxes_and_conversations(
+    create_org, create_user, async_session_maker, app_db_session, monkeypatch
+):
+    monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+    personal, team, other = create_org(), create_org(), create_org()
+    user = create_user(current_org_id=personal.id)
+    async with async_session_maker() as session:
+        role = Role(name=f'resolver-{uuid4()}', rank=1)
+        session.add(role)
+        await session.flush()
+        session.add(
+            OrgMember(org_id=team.id, user_id=user.id, role_id=role.id, _llm_api_key='')
+        )
+        await session.commit()
+
+    auth = SaasUserAuth(refresh_token=SecretStr(''), user_id=str(user.id))
+    context = ResolverUserContext(auth, resolver_org_id=team.id)
+    async with async_session_maker() as session:
+        service = SaasSQLAppConversationInfoService(session, context)
+        assert await sandbox_workspace_id(context) == str(team.id)
+        assert await service._get_effective_org_id() == team.id
+
+    untrusted = ResolverUserContext(
+        SaasUserAuth(refresh_token=SecretStr(''), user_id=str(user.id)),
+        resolver_org_id=other.id,
+    )
+    with pytest.raises(HTTPException) as error:
+        await sandbox_workspace_id(untrusted)
+    assert error.value.status_code == 403
+
+    personal_context = ResolverUserContext(
+        SaasUserAuth(refresh_token=SecretStr(''), user_id=str(user.id))
+    )
+    assert await sandbox_workspace_id(personal_context) == str(personal.id)
 
 
 def create_custom_secret(value: str, description: str = 'Test secret') -> CustomSecret:

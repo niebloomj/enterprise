@@ -114,61 +114,37 @@ class TestHashSessionApiKey:
 
 
 class TestScoping:
-    async def test_workspace_scope_excludes_other_and_legacy_sandboxes(
+    async def test_only_broker_sandboxes_are_workspace_scoped(
         self, db_session, store, monkeypatch
     ):
         monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
         personal, team = uuid4(), uuid4()
-
-        def row(name, workspace, key):
-            return StoredSandbox(
-                id=name,
-                backend=DOCKER_BACKEND,
-                created_by_user_id=OWNER_ID,
-                workspace_id=str(workspace) if workspace else None,
-                sandbox_spec_id='spec-1',
-                session_api_key_hash=hash_session_api_key(key),
-                created_at=CREATED_AT,
-            )
-
-        await store(
-            row('personal', personal, 'personal-key'),
-            row('team', team, 'team-key'),
-            row('legacy', None, 'legacy-key'),
-        )
+        old = _stored('old')
+        old.workspace_id = str(team)
+        legacy = _stored('legacy')
+        broker = _stored('broker')
+        broker.workspace_id = str(personal)
+        broker.subscription_broker_ready = True
+        await store(old, legacy, broker)
         context = _user_context(OWNER_ID)
         context.get_effective_org_id.return_value = personal
         page = await search_stored_sandboxes(
             db_session, context, DOCKER_BACKEND, None, 100
         )
-        assert {item.id for item in page.items} == {'personal', 'legacy'}
-        assert (
-            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'team')
-            is None
-        )
-        assert (
-            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'legacy')
-            is not None
-        )
-        assert (
-            await get_stored_sandbox_by_session_api_key(
-                db_session, context, DOCKER_BACKEND, 'team-key'
-            )
-            is None
-        )
+        assert {item.id for item in page.items} == {'old', 'legacy', 'broker'}
         context.get_effective_org_id.return_value = team
         page = await search_stored_sandboxes(
             db_session, context, DOCKER_BACKEND, None, 100
         )
-        assert {item.id for item in page.items} == {'team', 'legacy'}
+        assert {item.id for item in page.items} == {'old', 'legacy'}
         assert (
-            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'personal')
+            await get_stored_sandbox(db_session, context, DOCKER_BACKEND, 'broker')
             is None
         )
         admin_page = await search_stored_sandboxes(
             db_session, ADMIN, DOCKER_BACKEND, None, 100
         )
-        assert {item.id for item in admin_page.items} == {'personal', 'team', 'legacy'}
+        assert {item.id for item in admin_page.items} == {'old', 'legacy', 'broker'}
 
     async def test_disabled_flag_preserves_legacy_reuse_but_not_broker_sandboxes(
         self, db_session, store, monkeypatch
@@ -197,16 +173,21 @@ class TestScoping:
         )
         assert {item.id for item in page.items} == {'old', 'broker'}
 
-    async def test_workspace_scope_requires_effective_org(
-        self, db_session, monkeypatch
+    async def test_missing_workspace_keeps_ordinary_sandboxes_but_hides_broker(
+        self, db_session, store, monkeypatch
     ):
         monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        old = _stored('old')
+        broker = _stored('broker')
+        broker.workspace_id = str(uuid4())
+        broker.subscription_broker_ready = True
+        await store(old, broker)
         context = _user_context(OWNER_ID)
         context.get_effective_org_id.return_value = None
-        with pytest.raises(AuthError):
-            await search_stored_sandboxes(
-                db_session, context, DOCKER_BACKEND, None, 100
-            )
+        page = await search_stored_sandboxes(
+            db_session, context, DOCKER_BACKEND, None, 100
+        )
+        assert [item.id for item in page.items] == ['old']
 
     async def test_owner_sees_their_own(self, db_session, store):
         await store(_stored('sb-1'))

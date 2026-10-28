@@ -526,12 +526,14 @@ class TestDockerSandboxService:
         with pytest.raises(SandboxError, match='Could not read container'):
             await service.get_sandbox('oh-test-abc123')
 
+    @pytest.mark.parametrize('broker', [False, True])
     async def test_cloud_broker_environment_and_workspace_are_server_owned(
-        self, service, monkeypatch
+        self, service, monkeypatch, broker
     ):
         monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
         workspace_id = uuid4()
         service.user_context.get_effective_org_id.return_value = workspace_id
+        service.user_context.get_user_id.return_value = str(workspace_id)
         container = MagicMock()
         container.name = 'oh-test-cloud'
         container.status = 'running'
@@ -539,21 +541,26 @@ class TestDockerSandboxService:
         service.docker_client.containers.run.return_value = container
         sandbox = await service.start_sandbox(
             sandbox_id='cloud',
+            subscription_broker=broker,
             extra_env={
                 'OH_OPENAI_SUBSCRIPTION_MODE': 'local',
                 'OH_OPENAI_SUBSCRIPTION_BROKER_URL': 'https://attacker.example',
             },
         )
         env = service.docker_client.containers.run.call_args.kwargs['environment']
-        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
-        assert (
-            env['OH_OPENAI_SUBSCRIPTION_BROKER_URL']
-            == 'http://host.docker.internal:3000/api/llm/subscription/openai/runtime/token'
+        assert env['OH_OPENAI_SUBSCRIPTION_MODE'] == (
+            'broker' if broker else 'disabled'
         )
+        if broker:
+            assert env['OH_OPENAI_SUBSCRIPTION_BROKER_URL'] == (
+                'http://host.docker.internal:3000/api/llm/subscription/openai/runtime/token'
+            )
+        else:
+            assert 'OH_OPENAI_SUBSCRIPTION_BROKER_URL' not in env
         assert sandbox.workspace_id == str(workspace_id)
-        assert sandbox.subscription_broker_ready is True
+        assert sandbox.subscription_broker_ready is broker
         stored = await service.db_session.get(StoredSandbox, sandbox.id)
-        assert stored.subscription_broker_ready is True
+        assert stored.subscription_broker_ready is broker
 
     @patch('openhands.app_server.sandbox.docker_sandbox_service.base62.encodebytes')
     @patch('os.urandom')

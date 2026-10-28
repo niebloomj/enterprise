@@ -153,9 +153,25 @@ async def sandbox_workspace_id(user_context: UserContext) -> str | None:
     workspace = await getter() if callable(getter) else None
     if isinstance(workspace, UUID):
         return str(workspace)
-    if cloud_subscription_enabled():
-        raise AuthError('Workspace authentication required')
     return None
+
+
+async def subscription_sandbox_workspace_id(user_context: UserContext) -> str:
+    user_id = await require_user_id(user_context)
+    workspace_id = await sandbox_workspace_id(user_context)
+    if workspace_id is None or workspace_id != user_id:
+        raise AuthError('OpenAI subscription requires a personal workspace')
+    return workspace_id
+
+
+async def sandbox_start_workspace_id(
+    user_context: UserContext, *, subscription_broker: bool, broker_url: str | None
+) -> str | None:
+    if not subscription_broker:
+        return await sandbox_workspace_id(user_context)
+    if not cloud_subscription_enabled() or not broker_url:
+        raise AuthError('OpenAI subscription broker is unavailable')
+    return await subscription_sandbox_workspace_id(user_context)
 
 
 async def secure_select(
@@ -177,14 +193,11 @@ async def secure_select(
     if isinstance(user_context, SandboxUserContext):
         return query.where(StoredSandbox.id == user_context.sandbox_id)
     workspace_id = await sandbox_workspace_id(user_context)
-    if not cloud_subscription_enabled():
-        return query.where(
-            (~StoredSandbox.subscription_broker_ready)
-            | (StoredSandbox.workspace_id == workspace_id)
-        )
+    if workspace_id is None:
+        return query.where(~StoredSandbox.subscription_broker_ready)
     return query.where(
-        (StoredSandbox.workspace_id == workspace_id)
-        | StoredSandbox.workspace_id.is_(None)
+        (~StoredSandbox.subscription_broker_ready)
+        | (StoredSandbox.workspace_id == workspace_id)
     )
 
 

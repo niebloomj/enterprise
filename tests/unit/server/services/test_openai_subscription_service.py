@@ -11,6 +11,7 @@ from aiohttp import web
 from fastapi import FastAPI
 from pydantic import SecretStr
 
+from openhands.app_server.errors import AuthError
 from openhands.app_server.sandbox import session_auth
 from openhands.app_server.sandbox.preset_sandbox_spec_service import (
     PresetSandboxSpecService,
@@ -600,7 +601,14 @@ async def test_remote_sandbox_workspace_switch_and_owner_quota(
                 )
 
             personal, team_service = service(user_id), service(team.id)
-            first = await personal.start_sandbox(sandbox_id='personal')
+            with pytest.raises(AuthError, match='personal workspace'):
+                await team_service.start_sandbox(
+                    sandbox_id='forbidden', subscription_broker=True
+                )
+            assert starts == []
+            first = await personal.start_sandbox(
+                sandbox_id='personal', subscription_broker=True
+            )
             assert first.workspace_id == str(user_id)
             assert 'workspace_id' not in first.model_dump()
             await session.flush()
@@ -611,17 +619,22 @@ async def test_remote_sandbox_workspace_switch_and_owner_quota(
             await session.flush()
             assert second.workspace_id == str(team.id)
             assert runtimes['personal']['status'] == 'paused'
-            assert await personal.get_sandbox('team') is None
-            assert (await personal.search_sandboxes()).items[0].id == 'personal'
+            assert await personal.get_sandbox('team') is not None
+            assert {item.id for item in (await personal.search_sandboxes()).items} == {
+                'personal',
+                'team',
+            }
             assert (await team_service.search_sandboxes()).items[0].id == 'team'
             assert await personal.resume_sandbox('personal') is True
             assert runtimes['team']['status'] == 'paused'
             assert runtimes['personal']['status'] == 'running'
-            for body in starts:
-                assert body['environment']['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
-                assert (
-                    body['environment']['OH_OPENAI_SUBSCRIPTION_BROKER_URL']
-                    == 'https://app.example.com/api/llm/subscription/openai/runtime/token'
-                )
+            broker_env, ordinary_env = [body['environment'] for body in starts]
+            assert broker_env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'broker'
+            assert (
+                broker_env['OH_OPENAI_SUBSCRIPTION_BROKER_URL']
+                == 'https://app.example.com/api/llm/subscription/openai/runtime/token'
+            )
+            assert ordinary_env['OH_OPENAI_SUBSCRIPTION_MODE'] == 'disabled'
+            assert 'OH_OPENAI_SUBSCRIPTION_BROKER_URL' not in ordinary_env
     finally:
         await runner.cleanup()

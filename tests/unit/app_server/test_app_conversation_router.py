@@ -1030,6 +1030,40 @@ def _make_httpx_client(post_return=None, post_side_effect=None) -> AsyncMock:
 class TestSwitchConversationProfile:
     """Test suite for the /switch_profile endpoint."""
 
+    async def test_subscription_switch_requires_compatible_sandbox(self, monkeypatch):
+        monkeypatch.setenv('OH_ENABLE_CLOUD_OPENAI_SUBSCRIPTION', 'true')
+        monkeypatch.setenv('OH_OPENAI_SUBSCRIPTION_MODE', 'disabled')
+        conversation_id = uuid4()
+        settings = Settings(
+            llm_profiles=LLMProfiles(
+                profiles={
+                    'subscription': LLM(model='openai/gpt-5', auth_type='subscription')
+                }
+            )
+        )
+        ctx = _make_agent_server_context(conversation_id)
+        ctx.sandbox.subscription_broker_ready = False
+        client = _make_httpx_client()
+        with patch(
+            'openhands.app_server.app_conversation.app_conversation_router.'
+            '_get_agent_server_context',
+            new=AsyncMock(return_value=ctx),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await switch_conversation_profile(
+                    conversation_id=conversation_id,
+                    request=SwitchProfileRequest(profile_name='subscription'),
+                    user_settings=settings,
+                    app_conversation_service=MagicMock(),
+                    app_conversation_info_service=MagicMock(),
+                    sandbox_service=MagicMock(),
+                    sandbox_spec_service=MagicMock(),
+                    httpx_client=client,
+                )
+        assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+        assert 'new conversation' in exc_info.value.detail.lower()
+        client.post.assert_not_awaited()
+
     async def test_returns_404_when_user_settings_missing(self):
         """No user_settings → 404 (precondition for profile lookup)."""
         with pytest.raises(HTTPException) as exc_info:
