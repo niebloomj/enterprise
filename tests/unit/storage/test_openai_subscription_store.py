@@ -13,7 +13,7 @@ from tests import postgres_testdb
 
 def test_upgrade_and_downgrade_preserve_legacy_sandboxes(engine, test_database):
     postgres_testdb.run_alembic(
-        test_database.server, test_database.name, 'downgrade', '203'
+        test_database.server, test_database.name, 'downgrade', '204'
     )
     assert 'openai_subscription' not in inspect(engine).get_table_names()
     with engine.begin() as connection:
@@ -33,7 +33,7 @@ def test_upgrade_and_downgrade_preserve_legacy_sandboxes(engine, test_database):
         ).one()
     assert tuple(legacy) == (None, False)
     postgres_testdb.run_alembic(
-        test_database.server, test_database.name, 'downgrade', '203'
+        test_database.server, test_database.name, 'downgrade', '204'
     )
     assert 'openai_subscription' not in inspect(engine).get_table_names()
     assert 'workspace_id' not in {

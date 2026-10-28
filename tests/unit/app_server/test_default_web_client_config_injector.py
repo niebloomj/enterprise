@@ -1552,21 +1552,16 @@ class TestSurfacedACPProviders:
 
         assert set(SURFACED_ACP_PROVIDERS) <= set(ACP_PROVIDERS)
 
-    def test_optional_model_metadata_matches_installed_sdk(self):
-        from openhands.app_server.web_client.default_web_client_config_injector import (
-            DefaultWebClientConfigInjector,
+    def test_config_carries_no_curated_model_lists(self):
+        """The SDK registry dropped its model lists in 1.59.0; the agent's
+        session reports models instead (``AppConversation.acp_available_models``)."""
+        from openhands.app_server.web_client.web_client_models import (
+            ACPProviderConfig,
         )
-        from openhands.sdk.settings import ACP_PROVIDERS
 
-        for entry in DefaultWebClientConfigInjector().acp_providers:
-            provider = ACP_PROVIDERS[entry.key]
-            assert entry.default_model == (
-                getattr(provider, 'default_model', None) or None
-            )
-            assert [(m.id, m.label) for m in entry.available_models] == [
-                (m.id, m.label)
-                for m in (getattr(provider, 'available_models', None) or [])
-            ]
+        assert {'default_model', 'available_models'}.isdisjoint(
+            ACPProviderConfig.model_fields
+        )
 
 
 class TestGetProviderDefaultHosts:

@@ -1,7 +1,7 @@
 """Create user-scoped encrypted OpenAI subscription state.
 
-Revision ID: 204
-Revises: 203
+Revision ID: 205
+Revises: 204
 """
 
 from typing import Sequence
@@ -9,8 +9,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '204'
-down_revision: str | None = '203'
+revision: str = '205'
+down_revision: str | None = '204'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
